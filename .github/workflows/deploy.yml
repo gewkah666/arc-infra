@@ -29,16 +29,13 @@ jobs:
 
       - name: Setup arc-infra on server
         # arc-infra is a public repo (only docker-compose + SQL; no secrets).
-        # Clone into a temp dir first, then move — avoids the
-        # 'initial ref transaction called with existing refs' git bug when
-        # the destination directory has stale state.
+        # Clone into a per-deploy unique temp dir to dodge /tmp race conditions
+        # and the 'initial ref transaction' git bug on reused dirs.
         run: |
           ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} "
             set -e
-            rm -rf /tmp/arc-infra-fresh
-            git clone --depth=1 https://github.com/gewkah666/arc-infra.git /tmp/arc-infra-fresh
             rm -rf ~/arc-infra
-            mv /tmp/arc-infra-fresh ~/arc-infra
+            git clone --depth=1 https://github.com/gewkah666/arc-infra.git ~/arc-infra
             mkdir -p ~/arc-infra/data/videos
             ls -la ~/arc-infra
           "
