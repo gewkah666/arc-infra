@@ -1,0 +1,3 @@
+# Preserves the directory for the host bind mount
+# (`./data/videos:/app/data/videos` in docker-compose.yml).
+# Uploaded videos land here at runtime.

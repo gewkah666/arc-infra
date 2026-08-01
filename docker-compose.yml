@@ -1,34 +1,36 @@
 # Arc full-stack docker-compose
 #
-# Brings up the entire Arc stack using the upstream repos as build contexts:
-#   - ../arc-gateway       Rust API gateway
-#   - ../arc-core          Python pose service + Celery worker
-#   - ../arc-web-admin     React admin SPA
+# Pulls pre-built images from GitHub Container Registry (ghcr.io). Each
+# upstream repo's CI builds and pushes its image on push to main:
+#   - ghcr.io/gewkah666/arc-gateway
+#   - ghcr.io/gewkah666/arc-core
+#   - ghcr.io/gewkah666/arc-web-admin
 #
-# Each upstream repo has its own .github/workflows/ci.yml that builds and
-# tests the image independently. This compose file is for local dev / single-
-# host deploys where everything runs on one docker host.
+# The deploy workflow (deploy.yml) runs:
+#   docker login ghcr.io
+#   docker compose pull && down && up -d
+#
+# Local dev (build from source): see ../arc-gateway, ../arc-core, ../arc-web-admin.
 
 services:
   gateway:
-    build:
-      context: ../arc-gateway
-      dockerfile: docker/Dockerfile
-    image: arc-gateway:local
+    image: ghcr.io/gewkah666/arc-gateway:latest
+    pull_policy: always
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
-      - APP__DATABASE_URL=postgresql://postgres:postgres@db:5432/arc
+      - APP__DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/arc
       - APP__REDIS_URL=redis://redis:6379/0
       - APP__RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
       - APP__POSE_SERVICE_URL=pose-service:50051
       - APP__VIDEO_UPLOAD_DIR=/app/data/videos
-      - APP__JWT_SECRET=dev-secret-key-change-in-production
+      - APP__JWT_SECRET=${JWT_SECRET:-dev-secret-key-change-in-production}
       - APP__JWT_EXPIRATION_HOURS=24
       - APP__SERVER_HOST=0.0.0.0
       - APP__SERVER_PORT=8000
       - APP__ADMIN_INITIAL_USERNAME=admin
-      - APP__ADMIN_INITIAL_PASSWORD=admin123
+      - APP__ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD:-admin123}
     depends_on:
       - db
       - redis
@@ -37,24 +39,25 @@ services:
     volumes:
       # data/videos is owned by arc-gateway (the upload endpoint writes here).
       # Both gateway and celery-worker need read/write access.
-      - ../arc-gateway/data/videos:/app/data/videos
+      - ./data/videos:/app/data/videos
 
   pose-service:
-    build:
-      context: ../arc-core
-      dockerfile: docker/Dockerfile
-    image: arc-pose-service:local
+    image: ghcr.io/gewkah666/arc-core:latest
+    pull_policy: always
+    restart: unless-stopped
     ports:
-      - "50051:50051"
+      - "127.0.0.1:50051:50051"
+    # arc-core image bundles models/pose_landmarker_lite.task; no bind mount needed.
+    environment:
+      - MEDIAPIPE_POSE_MODEL_PATH=/app/models/pose_landmarker_lite.task
     command: ["python", "-m", "app.services.pose_server"]
 
   celery-worker:
-    build:
-      context: ../arc-core
-      dockerfile: docker/Dockerfile
-    image: arc-celery-worker:local
+    image: ghcr.io/gewkah666/arc-core:latest
+    pull_policy: always
+    restart: unless-stopped
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/arc
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/arc
       - REDIS_URL=redis://redis:6379/0
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
       - VIDEO_UPLOAD_DIR=/app/data/videos
@@ -64,44 +67,46 @@ services:
       - redis
       - rabbitmq
     volumes:
-      - ../arc-gateway/data/videos:/app/data/videos
-      - ../arc-core/models:/app/models
+      - ./data/videos:/app/data/videos
     command: celery -A app.tasks.celery_tasks worker --loglevel=info
 
   web-admin:
-    build:
-      context: ../arc-web-admin
-      dockerfile: Dockerfile
-    image: arc-web-admin:local
+    image: ghcr.io/gewkah666/arc-web-admin:latest
+    pull_policy: always
+    restart: unless-stopped
     ports:
-      - "3000:80"
+      - "8080:80"
     depends_on:
       - gateway
 
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_DB=arc
     ports:
-      - "5432:5432"
+      # Localhost-only — NEVER expose publicly (post-2026-07-29 incident).
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/db/init.sql:/docker-entrypoint-initdb.d/init.sql
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
+    restart: unless-stopped
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
 
 volumes:
   postgres_data:

@@ -1,0 +1,64 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    # GitHub-hosted runner; SSHes into the Tencent Cloud server to deploy.
+    # Self-hosted is optional — uncomment the runs-on below if you prefer to
+    # skip SSH and run docker compose directly on the server.
+    runs-on: ubuntu-latest
+    # runs-on: [self-hosted, arc-infra-deploy]
+    steps:
+      - name: Checkout arc-infra
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_tencent
+          chmod 600 ~/.ssh/id_tencent
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Show current server state
+        run: |
+          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
+            'echo "=== before ===" && docker compose ls && docker ps --format "table {{.Names}}\t{{.Status}}"'
+
+      - name: Login to ghcr.io on server
+        run: |
+          # Forward GITHUB_TOKEN to the server so docker compose pull works.
+          # The server stores it temporarily for the duration of this job.
+          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
+            "echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+
+      - name: Pull, stop, boot
+        run: |
+          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} 'cd ~/arc-infra && docker compose pull && docker compose down --remove-orphans || true && docker compose up -d'
+
+      - name: Wait for gateway health
+        run: |
+          for i in $(seq 1 30); do
+            if ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
+                'curl -fsS http://127.0.0.1:8000/health 2>/dev/null' 2>/dev/null; then
+              echo "gateway healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::gateway did not become healthy in 60s"
+          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
+            'cd ~/arc-infra && docker compose logs --tail=50 gateway'
+          exit 1
+
+      - name: Show final state
+        run: |
+          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
+            'cd ~/arc-infra && docker compose ps'
