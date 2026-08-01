@@ -1,0 +1,47 @@
+-- Migration for existing databases (safe to re-run)
+
+CREATE TABLE IF NOT EXISTS admin_users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(50) NOT NULL DEFAULT 'admin',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_login_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS rules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    sport_type VARCHAR(50) NOT NULL,
+    params JSONB NOT NULL DEFAULT '{}',
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR(100);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(100);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) NOT NULL DEFAULT 'user';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+UPDATE users SET nickname = COALESCE(nickname, split_part(email, '@', 1)) WHERE nickname IS NULL;
+UPDATE users SET username = COALESCE(username, nickname) WHERE username IS NULL;
+
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS original_filename VARCHAR(255);
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS file_size BIGINT;
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS width INTEGER;
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS height INTEGER;
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS fps FLOAT;
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS pose_data JSONB;
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS processing_status VARCHAR(50) DEFAULT 'pending';
+ALTER TABLE videos ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+UPDATE videos SET original_filename = filename WHERE original_filename IS NULL;
+
+ALTER TABLE standard_motions ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE standard_motions ADD COLUMN IF NOT EXISTS video_id UUID;
+ALTER TABLE standard_motions ADD COLUMN IF NOT EXISTS pose_data JSONB;
+ALTER TABLE standard_motions ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
+ALTER TABLE standard_motions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+
+ALTER TABLE practice_records ADD COLUMN IF NOT EXISTS practiced_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+UPDATE practice_records SET practiced_at = created_at WHERE practiced_at IS NULL AND created_at IS NOT NULL;

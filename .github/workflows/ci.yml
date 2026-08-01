@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout sibling repos
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.repository.name }}-gateway
+          path: arc-gateway
+          # In real CI, replace these with real repo slugs:
+          # gateway  -> arc-gateway
+          # core     -> arc-core
+          # web-admin -> arc-web-admin
+        # Note: this is a placeholder; in production each upstream repo is
+        # checked out under its real path. See arc-infra README §"Build context".
+
+      - name: Validate docker-compose.yml
+        run: |
+          # Without sibling repos present we can only validate YAML syntax.
+          docker run --rm -v "$PWD:/work" -w /work docker/compose:latest \
+              -f docker-compose.yml config
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: validate-compose
+    steps:
+      - name: Checkout sibling repos (real slug version)
+        # Real implementation: check out each upstream repo into ../<name>.
+        # Stubbed here because this CI runs in arc-infra's own context.
+        run: |
+          echo "::notice::Real CI must check out arc-gateway, arc-core, arc-web-admin as siblings."
+          exit 0

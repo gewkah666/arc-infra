@@ -1,0 +1,15 @@
+# Local env overrides
+.env
+.env.local
+.env.*.local
+
+# Local docker-compose overrides (use these freely; do NOT commit)
+docker-compose.override.yml
+docker-compose.*.yml
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
