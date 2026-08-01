@@ -20,10 +20,16 @@ jobs:
       - name: Checkout arc-infra
         uses: actions/checkout@v4
 
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_tencent
+          chmod 600 ~/.ssh/id_tencent
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
       - name: Setup arc-infra on server
         # Server may not have arc-infra cloned yet. SSH into server and clone
         # via https with the GITHUB_TOKEN forwarded as basic auth.
-        # ARC_INFRA_DIR is the destination on the server.
         run: |
           ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} << EOF
             set -e
@@ -37,13 +43,6 @@ jobs:
             mkdir -p ~/arc-infra/data/videos
             ls -la ~/arc-infra
           EOF
-
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_tencent
-          chmod 600 ~/.ssh/id_tencent
-          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Show current server state
         run: |
