@@ -29,17 +29,14 @@ jobs:
 
       - name: Setup arc-infra on server
         # Server may not have arc-infra cloned yet. SSH into server and clone
-        # via https with the GITHUB_TOKEN forwarded as basic auth.
+        # via https with the GITHUB_TOKEN forwarded as basic auth. Use shallow
+        # clone (depth=1) because the deploy workflow only needs HEAD and the
+        # full history is irrelevant for compose orchestration.
         run: |
           ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} << EOF
             set -e
-            if [ ! -d ~/arc-infra/.git ]; then
-              echo "Cloning arc-infra to ~/arc-infra..."
-              git clone https://x-access-token:${GITHUB_TOKEN}@github.com/gewkah666/arc-infra.git ~/arc-infra
-            else
-              echo "Updating existing ~/arc-infra..."
-              cd ~/arc-infra && git pull --ff-only
-            fi
+            rm -rf ~/arc-infra
+            git clone --depth=1 https://x-access-token:${GITHUB_TOKEN}@github.com/gewkah666/arc-infra.git ~/arc-infra
             mkdir -p ~/arc-infra/data/videos
             ls -la ~/arc-infra
           EOF
