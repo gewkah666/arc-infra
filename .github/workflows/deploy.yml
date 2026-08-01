@@ -28,17 +28,14 @@ jobs:
           ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Setup arc-infra on server
-        # arc-infra is a public repo (only docker-compose + SQL; no secrets).
-        # Clone into a per-deploy unique temp dir to dodge /tmp race conditions
-        # and the 'initial ref transaction' git bug on reused dirs.
+        # Server's outbound HTTPS to github.com is throttled (~1 KB/s), making
+        # `git clone` on the server time out. The runner has a fast connection,
+        # so rsync the already-checked-out tree over SSH instead.
         run: |
-          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} "
-            set -e
-            rm -rf ~/arc-infra
-            git clone --depth=1 https://github.com/gewkah666/arc-infra.git ~/arc-infra
-            mkdir -p ~/arc-infra/data/videos
-            ls -la ~/arc-infra
-          "
+          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} "rm -rf ~/arc-infra && mkdir -p ~/arc-infra/data/videos"
+          rsync -az -e "ssh -i ~/.ssh/id_tencent" --delete \
+            --exclude='.git' --exclude='data/videos/*' --exclude='.env' \
+            ./ ubuntu@${{ secrets.SERVER_HOST }}:~/arc-infra/
 
       - name: Show current server state
         run: |
