@@ -49,11 +49,12 @@ jobs:
             'echo "=== before ===" && docker compose ls && docker ps --format "table {{.Names}}\t{{.Status}}"'
 
       - name: Login to ghcr.io on server
+        # GITHUB_TOKEN doesn't carry packages:read scope on this org, so the
+        # server's docker pull gets 403. Use a dedicated PAT (GHCR_PAT) with
+        # packages:read scope instead.
         run: |
-          # Forward GITHUB_TOKEN to the server so docker compose pull works.
-          # The server stores it temporarily for the duration of this job.
           ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
-            "echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+            "echo '${{ secrets.GHCR_PAT }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
 
       - name: Pull, stop, boot
         run: |
