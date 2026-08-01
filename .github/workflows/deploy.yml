@@ -29,12 +29,16 @@ jobs:
 
       - name: Setup arc-infra on server
         # arc-infra is a public repo (only docker-compose + SQL; no secrets).
-        # Plain `git clone` without auth works.
+        # Clone into a temp dir first, then move — avoids the
+        # 'initial ref transaction called with existing refs' git bug when
+        # the destination directory has stale state.
         run: |
           ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} "
             set -e
+            rm -rf /tmp/arc-infra-fresh
+            git clone --depth=1 https://github.com/gewkah666/arc-infra.git /tmp/arc-infra-fresh
             rm -rf ~/arc-infra
-            git clone --depth=1 https://github.com/gewkah666/arc-infra.git ~/arc-infra
+            mv /tmp/arc-infra-fresh ~/arc-infra
             mkdir -p ~/arc-infra/data/videos
             ls -la ~/arc-infra
           "
