@@ -20,6 +20,24 @@ jobs:
       - name: Checkout arc-infra
         uses: actions/checkout@v4
 
+      - name: Setup arc-infra on server
+        # Server may not have arc-infra cloned yet. SSH into server and clone
+        # via https with the GITHUB_TOKEN forwarded as basic auth.
+        # ARC_INFRA_DIR is the destination on the server.
+        run: |
+          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} << EOF
+            set -e
+            if [ ! -d ~/arc-infra/.git ]; then
+              echo "Cloning arc-infra to ~/arc-infra..."
+              git clone https://x-access-token:${GITHUB_TOKEN}@github.com/gewkah666/arc-infra.git ~/arc-infra
+            else
+              echo "Updating existing ~/arc-infra..."
+              cd ~/arc-infra && git pull --ff-only
+            fi
+            mkdir -p ~/arc-infra/data/videos
+            ls -la ~/arc-infra
+          EOF
+
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
