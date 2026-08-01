@@ -75,7 +75,9 @@ services:
     pull_policy: always
     restart: unless-stopped
     ports:
-      - "8080:80"
+      # 8080 occupied on this host by an orphan process; 8090 is free.
+      # The arc-infra docker-compose.yml can be reverted to 8080 on a fresh host.
+      - "8090:80"
     depends_on:
       - gateway
 
