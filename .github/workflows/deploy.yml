@@ -28,18 +28,16 @@ jobs:
           ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Setup arc-infra on server
-        # Server may not have arc-infra cloned yet. SSH into server and clone
-        # via https with the GITHUB_TOKEN forwarded as basic auth. Use shallow
-        # clone (depth=1) because the deploy workflow only needs HEAD and the
-        # full history is irrelevant for compose orchestration.
+        # arc-infra is a public repo (only docker-compose + SQL; no secrets).
+        # Plain `git clone` without auth works.
         run: |
-          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} << EOF
+          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} "
             set -e
             rm -rf ~/arc-infra
-            git clone --depth=1 https://x-access-token:${GITHUB_TOKEN}@github.com/gewkah666/arc-infra.git ~/arc-infra
+            git clone --depth=1 https://github.com/gewkah666/arc-infra.git ~/arc-infra
             mkdir -p ~/arc-infra/data/videos
             ls -la ~/arc-infra
-          EOF
+          "
 
       - name: Show current server state
         run: |
