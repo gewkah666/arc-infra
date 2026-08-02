@@ -23,11 +23,13 @@ jobs:
 
       - name: Sync checkout -> ~/arc-infra
         # Run docker compose from ~/arc-infra so the project name stays
-        # `arc-infra` (project name defaults to the dir name). Also rsync is
-        # reliable; cp -a preserves perms.
+        # `arc-infra` (project name defaults to the dir name).
+        # rsync is more reliable than cp -a across filesystems (cp tries to
+        # preserve ownership which fails when runner user != dest file owner).
         run: |
-          rm -rf ~/arc-infra/.github/workflows   # exclude CI files from the live dir
-          cp -a ./. ~/arc-infra/
+          rsync -a --delete \
+            --exclude='.git' --exclude='.github' \
+            ./ ~/arc-infra/
           mkdir -p ~/arc-infra/data/videos
           cd ~/arc-infra
 
