@@ -11,65 +11,54 @@ permissions:
 
 jobs:
   deploy:
-    # GitHub-hosted runner; SSHes into the Tencent Cloud server to deploy.
-    # Self-hosted is optional — uncomment the runs-on below if you prefer to
-    # skip SSH and run docker compose directly on the server.
-    runs-on: ubuntu-latest
-    # runs-on: [self-hosted, arc-infra-deploy]
+    # Self-hosted runner on the Tencent Cloud server (label `arc-infra-deploy`).
+    # Eliminates: SSH dance, PAT secret, rsync of compose files, manual image load.
+    # The runner already has docker, the working tree, and ghcr.io creds (via
+    # GITHUB_TOKEN with packages:read).
+    runs-on: [self-hosted, arc-infra-deploy]
+
     steps:
       - name: Checkout arc-infra
         uses: actions/checkout@v4
 
-      - name: Setup SSH key
+      - name: Sync checkout -> ~/arc-infra
+        # Run docker compose from ~/arc-infra so the project name stays
+        # `arc-infra` (project name defaults to the dir name). Also rsync is
+        # reliable; cp -a preserves perms.
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_tencent
-          chmod 600 ~/.ssh/id_tencent
-          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          rm -rf ~/arc-infra/.github/workflows   # exclude CI files from the live dir
+          cp -a ./. ~/arc-infra/
+          mkdir -p ~/arc-infra/data/videos
+          cd ~/arc-infra
 
-      - name: Setup arc-infra on server
-        # Server's outbound HTTPS to github.com is throttled (~1 KB/s), making
-        # `git clone` on the server time out. The runner has a fast connection,
-        # so rsync the already-checked-out tree over SSH instead.
-        run: |
-          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} "rm -rf ~/arc-infra && mkdir -p ~/arc-infra/data/videos"
-          rsync -az -e "ssh -i ~/.ssh/id_tencent" --delete \
-            --exclude='.git' --exclude='data/videos/*' --exclude='.env' \
-            ./ ubuntu@${{ secrets.SERVER_HOST }}:~/arc-infra/
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Show current server state
-        run: |
-          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
-            'echo "=== before ===" && docker compose ls && docker ps --format "table {{.Names}}\t{{.Status}}"'
+      - name: Pull latest images
+        run: docker compose pull
 
-      - name: Login to ghcr.io on server
-        # GITHUB_TOKEN doesn't carry packages:read scope on this org, so the
-        # server's docker pull gets 403. Use a dedicated PAT (GHCR_PAT) with
-        # packages:read scope instead.
-        run: |
-          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
-            "echo '${{ secrets.GHCR_PAT }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+      - name: Stop existing stack
+        run: docker compose down --remove-orphans || true
 
-      - name: Pull, stop, boot
-        run: |
-          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} 'cd ~/arc-infra && docker compose pull && docker compose down --remove-orphans || true && docker compose up -d'
+      - name: Boot stack
+        run: docker compose up -d
 
       - name: Wait for gateway health
         run: |
           for i in $(seq 1 30); do
-            if ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
-                'curl -fsS http://127.0.0.1:8000/health 2>/dev/null' 2>/dev/null; then
+            if curl -fsS http://127.0.0.1:8000/health 2>/dev/null; then
               echo "gateway healthy"
               exit 0
             fi
             sleep 2
           done
           echo "::error::gateway did not become healthy in 60s"
-          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
-            'cd ~/arc-infra && docker compose logs --tail=50 gateway'
+          docker compose logs --tail=50 gateway
           exit 1
 
       - name: Show final state
-        run: |
-          ssh -i ~/.ssh/id_tencent ubuntu@${{ secrets.SERVER_HOST }} \
-            'cd ~/arc-infra && docker compose ps'
+        run: docker compose ps
