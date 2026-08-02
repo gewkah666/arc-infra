@@ -34,11 +34,16 @@ jobs:
           cd ~/arc-infra
 
       - name: Login to ghcr.io
+        # logout: false — on a self-hosted runner, the credentials persist
+        # across job runs and need to remain for subsequent `docker compose
+        # pull` to find them. Logout (default true) deletes them right after
+        # this step, making the immediate next `docker compose pull` get 403.
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          logout: false
 
       - name: Pull latest images
         run: docker compose pull
