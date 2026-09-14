@@ -94,6 +94,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # 幂等种子：3 个健身动作 + 3 条规则。只在首次 initdb 时自动执行；已有库需手动
+      #   psql -U postgres -d arc -f docker/db/migrations/002_seed_fitness_motions.sql
+      - ./docker/db/migrations/002_seed_fitness_motions.sql:/docker-entrypoint-initdb.d/init_002_seed_fitness_motions.sql
 
   redis:
     image: redis:7-alpine
