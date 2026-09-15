@@ -18,7 +18,7 @@ name: deploy
 
 on:
   push:
-    branches: [main, feat/local-build-deploy]  # TEST: 合并前去掉分支
+    branches: [main]
   repository_dispatch:
     types: [deploy]
   workflow_dispatch:
@@ -41,9 +41,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GATEWAY_REF: ${{ github.event.inputs.gateway_ref || 'feat/dockerfile-mirror-args' }}  # TEST
-  CORE_REF: ${{ github.event.inputs.core_ref || 'feat/dockerfile-mirror-args' }}  # TEST
-  WEB_ADMIN_REF: ${{ github.event.inputs.web_admin_ref || 'feat/dockerfile-mirror-args' }}  # TEST
+  GATEWAY_REF: ${{ github.event.inputs.gateway_ref || 'main' }}
+  CORE_REF: ${{ github.event.inputs.core_ref || 'main' }}
+  WEB_ADMIN_REF: ${{ github.event.inputs.web_admin_ref || 'main' }}
 
 jobs:
   bundle:
