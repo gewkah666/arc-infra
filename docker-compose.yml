@@ -1,21 +1,20 @@
 # Arc full-stack docker-compose
 #
-# Pulls pre-built images from GitHub Container Registry (ghcr.io). Each
-# upstream repo's CI builds and pushes its image on push to main:
+# 镜像在部署服务器上本地构建（.github/workflows/deploy.yml），tag 沿用
+# ghcr.io/gewkah666/<svc>:latest 只是为了和 CI 推到 GHCR 的镜像同名：
 #   - ghcr.io/gewkah666/arc-gateway
 #   - ghcr.io/gewkah666/arc-core
 #   - ghcr.io/gewkah666/arc-web-admin
-#
-# The deploy workflow (deploy.yml) runs:
-#   docker login ghcr.io
-#   docker compose pull && down && up -d
+# 不要在服务器上 `docker compose pull`：腾讯云到 GHCR 只有 ~27KB/s，会卡死。
+# 手动起栈用：docker compose up -d --no-build --pull never
 #
 # Local dev (build from source): see ../arc-gateway, ../arc-core, ../arc-web-admin.
 
 services:
   gateway:
     image: ghcr.io/gewkah666/arc-gateway:latest
-    pull_policy: always
+    # 镜像在服务器本地构建（deploy.yml），不要自动去 ghcr.io 拉：国内拉不动会卡死
+    pull_policy: never
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -43,7 +42,8 @@ services:
 
   pose-service:
     image: ghcr.io/gewkah666/arc-core:latest
-    pull_policy: always
+    # 镜像在服务器本地构建（deploy.yml），不要自动去 ghcr.io 拉：国内拉不动会卡死
+    pull_policy: never
     restart: unless-stopped
     ports:
       - "127.0.0.1:50051:50051"
@@ -54,7 +54,8 @@ services:
 
   celery-worker:
     image: ghcr.io/gewkah666/arc-core:latest
-    pull_policy: always
+    # 镜像在服务器本地构建（deploy.yml），不要自动去 ghcr.io 拉：国内拉不动会卡死
+    pull_policy: never
     restart: unless-stopped
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/arc
@@ -72,7 +73,8 @@ services:
 
   web-admin:
     image: ghcr.io/gewkah666/arc-web-admin:latest
-    pull_policy: always
+    # 镜像在服务器本地构建（deploy.yml），不要自动去 ghcr.io 拉：国内拉不动会卡死
+    pull_policy: never
     restart: unless-stopped
     ports:
       # 8080 occupied on this host by an orphan process; 8090 is free.

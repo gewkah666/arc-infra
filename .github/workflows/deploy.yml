@@ -1,69 +1,160 @@
 name: deploy
 
+# 部署 = 在服务器上本地构建三个镜像 + docker compose up。
+# 不再从 ghcr.io 拉镜像：腾讯云到 GitHub CDN / GHCR / Actions artifact 只有
+# 20–40KB/s（2026-09-14 实测），新镜像根本拉不下来。源码 clone 也慢，但只有
+# 几 MB 且 checkout 是增量的；依赖全部走国内镜像（腾讯 apt/pip、rsproxy、npmmirror）。
+#
+# 触发：
+#   - arc-infra main 有 push（compose / 迁移改动）
+#   - 应用仓库 main 构建成功后 repository_dispatch（event_type=deploy）
+#   - 手动 workflow_dispatch，可指定各仓库的 ref
+
 on:
   push:
-    branches: [main]
+    branches: [main, feat/local-build-deploy]  # TEST: 合并前去掉分支
+  repository_dispatch:
+    types: [deploy]
   workflow_dispatch:
+    inputs:
+      gateway_ref:
+        description: arc-gateway ref
+        default: main
+      core_ref:
+        description: arc-core ref
+        default: main
+      web_admin_ref:
+        description: arc-web-admin ref
+        default: main
 
 permissions:
   contents: read
-  packages: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  GATEWAY_REF: ${{ github.event.inputs.gateway_ref || 'feat/dockerfile-mirror-args' }}  # TEST
+  CORE_REF: ${{ github.event.inputs.core_ref || 'feat/dockerfile-mirror-args' }}  # TEST
+  WEB_ADMIN_REF: ${{ github.event.inputs.web_admin_ref || 'feat/dockerfile-mirror-args' }}  # TEST
+  APT_MIRROR: mirrors.cloud.tencent.com
+  PIP_INDEX_URL: https://mirrors.cloud.tencent.com/pypi/simple
+  CARGO_REGISTRY: sparse+https://rsproxy.cn/index/
+  NPM_REGISTRY: https://registry.npmmirror.com
 
 jobs:
   deploy:
     # Self-hosted runner on the Tencent Cloud server (label `arc-infra-deploy`).
-    # Eliminates: SSH dance, PAT secret, rsync of compose files, manual image load.
-    # The runner already has docker, the working tree, and ghcr.io creds (via
-    # GITHUB_TOKEN with packages:read).
     runs-on: [self-hosted, arc-infra-deploy]
+    timeout-minutes: 90
 
     steps:
       - name: Checkout arc-infra
         uses: actions/checkout@v4
 
-      - name: Sync checkout -> ~/arc-infra
-        # Run docker compose from ~/arc-infra so the project name stays
-        # `arc-infra` (project name defaults to the dir name).
-        # rsync is more reliable than cp -a across filesystems (cp tries to
-        # preserve ownership which fails when runner user != dest file owner).
+      # GHCR_PAT 有 repo scope，用于 clone 私有应用仓库。arc-proto 是公开的，
+      # submodule 走匿名即可。_work 目录在 self-hosted runner 上持久，第二次起是增量 fetch。
+      - name: Checkout arc-gateway
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/arc-gateway
+          ref: ${{ env.GATEWAY_REF }}
+          token: ${{ secrets.GHCR_PAT }}
+          submodules: recursive
+          path: build/arc-gateway
+
+      - name: Checkout arc-core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/arc-core
+          ref: ${{ env.CORE_REF }}
+          token: ${{ secrets.GHCR_PAT }}
+          submodules: recursive
+          path: build/arc-core
+          # data/ 里有 29MB 的 blender 渲染帧，镜像用不到，别拉
+          sparse-checkout: |
+            app
+            docker
+            models
+            proto
+            generate_grpc.py
+            generate_grpc.sh
+            requirements.txt
+          sparse-checkout-cone-mode: false
+
+      - name: Checkout arc-web-admin
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/arc-web-admin
+          ref: ${{ env.WEB_ADMIN_REF }}
+          token: ${{ secrets.GHCR_PAT }}
+          path: build/arc-web-admin
+
+      - name: Sync compose -> ~/arc-infra
+        # 项目名默认取目录名，保持 `arc-infra` 不变
         run: |
-          rsync -a --delete \
-            --exclude='.git' --exclude='.github' \
-            ./ ~/arc-infra/
+          rsync -a --delete --exclude='.git' --exclude='.github' --exclude='build' ./ ~/arc-infra/
           mkdir -p ~/arc-infra/data/videos
-          cd ~/arc-infra
 
-      - name: Login to ghcr.io
-        # GITHUB_TOKEN on this org's self-hosted runner doesn't carry
-        # packages:read scope, so pull gets 403. Use a dedicated PAT
-        # (GHCR_PAT) with packages:read scope instead.
-        # Logout: false — credentials persist for the next `docker compose
-        # pull` step in this job (and across future jobs on this runner).
+      - name: Build arc-gateway
         run: |
-          echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io \
-            -u ${{ github.actor }} --password-stdin
+          cd build/arc-gateway
+          sha=$(git rev-parse --short HEAD)
+          docker build -f docker/Dockerfile \
+            --build-arg APT_MIRROR=$APT_MIRROR \
+            --build-arg CARGO_REGISTRY=$CARGO_REGISTRY \
+            --build-arg CARGO_BUILD_JOBS=2 \
+            -t ghcr.io/${{ github.repository_owner }}/arc-gateway:latest \
+            -t ghcr.io/${{ github.repository_owner }}/arc-gateway:$sha .
 
-      - name: Pull latest images
-        run: docker compose pull
+      - name: Build arc-core
+        run: |
+          cd build/arc-core
+          sha=$(git rev-parse --short HEAD)
+          docker build -f docker/Dockerfile \
+            --build-arg APT_MIRROR=$APT_MIRROR \
+            --build-arg PIP_INDEX_URL=$PIP_INDEX_URL \
+            -t ghcr.io/${{ github.repository_owner }}/arc-core:latest \
+            -t ghcr.io/${{ github.repository_owner }}/arc-core:$sha .
 
-      - name: Stop existing stack
-        run: docker compose down --remove-orphans || true
+      - name: Build arc-web-admin
+        run: |
+          cd build/arc-web-admin
+          sha=$(git rev-parse --short HEAD)
+          docker build -f Dockerfile \
+            --build-arg NPM_REGISTRY=$NPM_REGISTRY \
+            -t ghcr.io/${{ github.repository_owner }}/arc-web-admin:latest \
+            -t ghcr.io/${{ github.repository_owner }}/arc-web-admin:$sha .
 
-      - name: Boot stack
-        run: docker compose up -d
+      - name: Roll stack
+        # compose 里 pull_policy: always 会再去拉 GHCR 而卡死，必须 --pull never；
+        # up 只重建镜像变了的容器，db/redis/rabbitmq 不动。
+        run: |
+          cd ~/arc-infra
+          docker compose up -d --remove-orphans --no-build --pull never
 
       - name: Wait for gateway health
         run: |
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8000/health 2>/dev/null; then
-              echo "gateway healthy"
-              exit 0
+              echo; echo "gateway healthy"; exit 0
             fi
             sleep 2
           done
           echo "::error::gateway did not become healthy in 60s"
-          docker compose logs --tail=50 gateway
+          cd ~/arc-infra && docker compose logs --tail=50 gateway
           exit 1
 
+      - name: Smoke — keypoints route present
+        run: |
+          body=$(curl -s -m 5 -X POST -H 'Content-Type: application/json' \
+            -d '{"seq":1,"ts_ms":1,"keypoints":[]}' \
+            http://127.0.0.1:8000/api/v1/realtime/sessions/00000000-0000-0000-0000-000000000000/keypoints)
+          echo "$body"
+          echo "$body" | grep -q '会话不存在' || { echo "::error::keypoints route missing"; exit 1; }
+
       - name: Show final state
-        run: docker compose ps
+        run: |
+          cd ~/arc-infra && docker compose ps
+          docker image prune -f >/dev/null || true
