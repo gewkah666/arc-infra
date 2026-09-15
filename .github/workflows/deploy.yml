@@ -1,9 +1,15 @@
 name: deploy
 
 # 部署 = 在服务器上本地构建三个镜像 + docker compose up。
-# 不再从 ghcr.io 拉镜像：腾讯云到 GitHub CDN / GHCR / Actions artifact 只有
-# 20–40KB/s（2026-09-14 实测），新镜像根本拉不下来。源码 clone 也慢，但只有
-# 几 MB 且 checkout 是增量的；依赖全部走国内镜像（腾讯 apt/pip、rsproxy、npmmirror）。
+#
+# 为什么这么绕：腾讯云服务器到 GitHub 的一切都很差——GHCR / GitHub CDN /
+# Actions artifact 只有 20–40KB/s，github.com:443 的 git clone 经常直接连不上
+# （2026-09-14/15 实测）。所以：
+#   1. bundle 作业在 GitHub 托管 runner 上 checkout 三个应用仓库 + 本仓库，
+#      打成一个几 MB 的源码包，作为 artifact 上传；
+#   2. deploy 作业在服务器的 self-hosted runner 上只下载这个小包（几分钟内能完成），
+#      用各 Dockerfile 的镜像源 build-arg（腾讯 apt/pip、rsproxy、npmmirror）本地构建，
+#      tag 沿用 ghcr.io/<owner>/<svc>:latest，然后 compose up --pull never。
 #
 # 触发：
 #   - arc-infra main 有 push（compose / 迁移改动）
@@ -38,23 +44,17 @@ env:
   GATEWAY_REF: ${{ github.event.inputs.gateway_ref || 'feat/dockerfile-mirror-args' }}  # TEST
   CORE_REF: ${{ github.event.inputs.core_ref || 'feat/dockerfile-mirror-args' }}  # TEST
   WEB_ADMIN_REF: ${{ github.event.inputs.web_admin_ref || 'feat/dockerfile-mirror-args' }}  # TEST
-  APT_MIRROR: mirrors.cloud.tencent.com
-  PIP_INDEX_URL: https://mirrors.cloud.tencent.com/pypi/simple
-  CARGO_REGISTRY: sparse+https://rsproxy.cn/index/
-  NPM_REGISTRY: https://registry.npmmirror.com
 
 jobs:
-  deploy:
-    # Self-hosted runner on the Tencent Cloud server (label `arc-infra-deploy`).
-    runs-on: [self-hosted, arc-infra-deploy]
-    timeout-minutes: 90
-
+  bundle:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout arc-infra
         uses: actions/checkout@v4
+        with:
+          path: src/arc-infra
 
-      # GHCR_PAT 有 repo scope，用于 clone 私有应用仓库。arc-proto 是公开的，
-      # submodule 走匿名即可。_work 目录在 self-hosted runner 上持久，第二次起是增量 fetch。
+      # GHCR_PAT 有 repo scope，用于 clone 私有应用仓库；arc-proto 公开，submodule 匿名即可
       - name: Checkout arc-gateway
         uses: actions/checkout@v4
         with:
@@ -62,7 +62,7 @@ jobs:
           ref: ${{ env.GATEWAY_REF }}
           token: ${{ secrets.GHCR_PAT }}
           submodules: recursive
-          path: build/arc-gateway
+          path: src/arc-gateway
 
       - name: Checkout arc-core
         uses: actions/checkout@v4
@@ -71,17 +71,7 @@ jobs:
           ref: ${{ env.CORE_REF }}
           token: ${{ secrets.GHCR_PAT }}
           submodules: recursive
-          path: build/arc-core
-          # data/ 里有 29MB 的 blender 渲染帧，镜像用不到，别拉
-          sparse-checkout: |
-            app
-            docker
-            models
-            proto
-            generate_grpc.py
-            generate_grpc.sh
-            requirements.txt
-          sparse-checkout-cone-mode: false
+          path: src/arc-core
 
       - name: Checkout arc-web-admin
         uses: actions/checkout@v4
@@ -89,47 +79,87 @@ jobs:
           repository: ${{ github.repository_owner }}/arc-web-admin
           ref: ${{ env.WEB_ADMIN_REF }}
           token: ${{ secrets.GHCR_PAT }}
-          path: build/arc-web-admin
+          path: src/arc-web-admin
+
+      - name: Record versions and pack
+        run: |
+          for r in arc-infra arc-gateway arc-core arc-web-admin; do
+            echo "$r $(git -C src/$r rev-parse --short HEAD)" >> src/VERSIONS
+          done
+          cat src/VERSIONS
+          # 排除 .git、测试、arc-core 的 29MB blender 渲染帧等镜像用不到的东西
+          tar -C src -czf bundle.tgz \
+            --exclude='.git' --exclude='.github' --exclude='tests' --exclude='target' \
+            --exclude='node_modules' --exclude='arc-core/data' --exclude='arc-core/tools' \
+            --exclude='arc-gateway/data' .
+          ls -l bundle.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: bundle.tgz
+          retention-days: 3
+          compression-level: 0
+
+  deploy:
+    needs: bundle
+    # Self-hosted runner on the Tencent Cloud server (label `arc-infra-deploy`).
+    runs-on: [self-hosted, arc-infra-deploy]
+    timeout-minutes: 120
+    env:
+      APT_MIRROR: mirrors.cloud.tencent.com
+      PIP_INDEX_URL: https://mirrors.cloud.tencent.com/pypi/simple
+      CARGO_REGISTRY: sparse+https://rsproxy.cn/index/
+      NPM_REGISTRY: https://registry.npmmirror.com
+    steps:
+      - name: Clean workspace
+        run: rm -rf bundle.tgz src
+
+      - name: Download source bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle
+
+      - name: Unpack
+        run: |
+          mkdir -p src && tar -C src -xzf bundle.tgz
+          cat src/VERSIONS
 
       - name: Sync compose -> ~/arc-infra
         # 项目名默认取目录名，保持 `arc-infra` 不变
         run: |
-          rsync -a --delete --exclude='.git' --exclude='.github' --exclude='build' ./ ~/arc-infra/
+          rsync -a --delete --exclude='.git' --exclude='.github' src/arc-infra/ ~/arc-infra/
           mkdir -p ~/arc-infra/data/videos
 
       - name: Build arc-gateway
         run: |
-          cd build/arc-gateway
-          sha=$(git rev-parse --short HEAD)
-          docker build -f docker/Dockerfile \
+          sha=$(awk '$1=="arc-gateway"{print $2}' src/VERSIONS)
+          docker build -f src/arc-gateway/docker/Dockerfile \
             --build-arg APT_MIRROR=$APT_MIRROR \
             --build-arg CARGO_REGISTRY=$CARGO_REGISTRY \
             --build-arg CARGO_BUILD_JOBS=2 \
             -t ghcr.io/${{ github.repository_owner }}/arc-gateway:latest \
-            -t ghcr.io/${{ github.repository_owner }}/arc-gateway:$sha .
+            -t ghcr.io/${{ github.repository_owner }}/arc-gateway:$sha src/arc-gateway
 
       - name: Build arc-core
         run: |
-          cd build/arc-core
-          sha=$(git rev-parse --short HEAD)
-          docker build -f docker/Dockerfile \
+          sha=$(awk '$1=="arc-core"{print $2}' src/VERSIONS)
+          docker build -f src/arc-core/docker/Dockerfile \
             --build-arg APT_MIRROR=$APT_MIRROR \
             --build-arg PIP_INDEX_URL=$PIP_INDEX_URL \
             -t ghcr.io/${{ github.repository_owner }}/arc-core:latest \
-            -t ghcr.io/${{ github.repository_owner }}/arc-core:$sha .
+            -t ghcr.io/${{ github.repository_owner }}/arc-core:$sha src/arc-core
 
       - name: Build arc-web-admin
         run: |
-          cd build/arc-web-admin
-          sha=$(git rev-parse --short HEAD)
-          docker build -f Dockerfile \
+          sha=$(awk '$1=="arc-web-admin"{print $2}' src/VERSIONS)
+          docker build -f src/arc-web-admin/Dockerfile \
             --build-arg NPM_REGISTRY=$NPM_REGISTRY \
             -t ghcr.io/${{ github.repository_owner }}/arc-web-admin:latest \
-            -t ghcr.io/${{ github.repository_owner }}/arc-web-admin:$sha .
+            -t ghcr.io/${{ github.repository_owner }}/arc-web-admin:$sha src/arc-web-admin
 
       - name: Roll stack
-        # compose 里 pull_policy: always 会再去拉 GHCR 而卡死，必须 --pull never；
-        # up 只重建镜像变了的容器，db/redis/rabbitmq 不动。
+        # compose 已是 pull_policy: never；--pull never 双保险。up 只重建镜像变了的容器。
         run: |
           cd ~/arc-infra
           docker compose up -d --remove-orphans --no-build --pull never
