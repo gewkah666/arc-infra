@@ -1,69 +1,190 @@
 name: deploy
 
+# 部署 = 在服务器上本地构建三个镜像 + docker compose up。
+#
+# 为什么这么绕：腾讯云服务器到 GitHub 的一切都很差——GHCR / GitHub CDN /
+# Actions artifact 只有 20–40KB/s，github.com:443 的 git clone 经常直接连不上
+# （2026-09-14/15 实测）。所以：
+#   1. bundle 作业在 GitHub 托管 runner 上 checkout 三个应用仓库 + 本仓库，
+#      打成一个几 MB 的源码包，作为 artifact 上传；
+#   2. deploy 作业在服务器的 self-hosted runner 上只下载这个小包（几分钟内能完成），
+#      用各 Dockerfile 的镜像源 build-arg（腾讯 apt/pip、rsproxy、npmmirror）本地构建，
+#      tag 沿用 ghcr.io/<owner>/<svc>:latest，然后 compose up --pull never。
+#
+# 触发：
+#   - arc-infra main 有 push（compose / 迁移改动）
+#   - 应用仓库 main 构建成功后 repository_dispatch（event_type=deploy）
+#   - 手动 workflow_dispatch，可指定各仓库的 ref
+
 on:
   push:
     branches: [main]
+  repository_dispatch:
+    types: [deploy]
   workflow_dispatch:
+    inputs:
+      gateway_ref:
+        description: arc-gateway ref
+        default: main
+      core_ref:
+        description: arc-core ref
+        default: main
+      web_admin_ref:
+        description: arc-web-admin ref
+        default: main
 
 permissions:
   contents: read
-  packages: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  GATEWAY_REF: ${{ github.event.inputs.gateway_ref || 'main' }}
+  CORE_REF: ${{ github.event.inputs.core_ref || 'main' }}
+  WEB_ADMIN_REF: ${{ github.event.inputs.web_admin_ref || 'main' }}
 
 jobs:
-  deploy:
-    # Self-hosted runner on the Tencent Cloud server (label `arc-infra-deploy`).
-    # Eliminates: SSH dance, PAT secret, rsync of compose files, manual image load.
-    # The runner already has docker, the working tree, and ghcr.io creds (via
-    # GITHUB_TOKEN with packages:read).
-    runs-on: [self-hosted, arc-infra-deploy]
-
+  bundle:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout arc-infra
         uses: actions/checkout@v4
+        with:
+          path: src/arc-infra
 
-      - name: Sync checkout -> ~/arc-infra
-        # Run docker compose from ~/arc-infra so the project name stays
-        # `arc-infra` (project name defaults to the dir name).
-        # rsync is more reliable than cp -a across filesystems (cp tries to
-        # preserve ownership which fails when runner user != dest file owner).
+      # GHCR_PAT 有 repo scope，用于 clone 私有应用仓库；arc-proto 公开，submodule 匿名即可
+      - name: Checkout arc-gateway
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/arc-gateway
+          ref: ${{ env.GATEWAY_REF }}
+          token: ${{ secrets.GHCR_PAT }}
+          submodules: recursive
+          path: src/arc-gateway
+
+      - name: Checkout arc-core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/arc-core
+          ref: ${{ env.CORE_REF }}
+          token: ${{ secrets.GHCR_PAT }}
+          submodules: recursive
+          path: src/arc-core
+
+      - name: Checkout arc-web-admin
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/arc-web-admin
+          ref: ${{ env.WEB_ADMIN_REF }}
+          token: ${{ secrets.GHCR_PAT }}
+          path: src/arc-web-admin
+
+      - name: Record versions and pack
         run: |
-          rsync -a --delete \
-            --exclude='.git' --exclude='.github' \
-            ./ ~/arc-infra/
+          for r in arc-infra arc-gateway arc-core arc-web-admin; do
+            echo "$r $(git -C src/$r rev-parse --short HEAD)" >> src/VERSIONS
+          done
+          cat src/VERSIONS
+          # 排除 .git、测试、arc-core 的 29MB blender 渲染帧等镜像用不到的东西
+          tar -C src -czf bundle.tgz \
+            --exclude='.git' --exclude='.github' --exclude='tests' --exclude='target' \
+            --exclude='node_modules' --exclude='arc-core/data' --exclude='arc-core/tools' \
+            --exclude='arc-gateway/data' .
+          ls -l bundle.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: bundle.tgz
+          retention-days: 3
+          compression-level: 0
+
+  deploy:
+    needs: bundle
+    # Self-hosted runner on the Tencent Cloud server (label `arc-infra-deploy`).
+    runs-on: [self-hosted, arc-infra-deploy]
+    timeout-minutes: 120
+    env:
+      APT_MIRROR: mirrors.cloud.tencent.com
+      PIP_INDEX_URL: https://mirrors.cloud.tencent.com/pypi/simple
+      CARGO_REGISTRY: sparse+https://rsproxy.cn/index/
+      NPM_REGISTRY: https://registry.npmmirror.com
+    steps:
+      - name: Clean workspace
+        run: rm -rf bundle.tgz src
+
+      - name: Download source bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle
+
+      - name: Unpack
+        run: |
+          mkdir -p src && tar -C src -xzf bundle.tgz
+          cat src/VERSIONS
+
+      - name: Sync compose -> ~/arc-infra
+        # 项目名默认取目录名，保持 `arc-infra` 不变
+        run: |
+          rsync -a --delete --exclude='.git' --exclude='.github' src/arc-infra/ ~/arc-infra/
           mkdir -p ~/arc-infra/data/videos
-          cd ~/arc-infra
 
-      - name: Login to ghcr.io
-        # GITHUB_TOKEN on this org's self-hosted runner doesn't carry
-        # packages:read scope, so pull gets 403. Use a dedicated PAT
-        # (GHCR_PAT) with packages:read scope instead.
-        # Logout: false — credentials persist for the next `docker compose
-        # pull` step in this job (and across future jobs on this runner).
+      - name: Build arc-gateway
         run: |
-          echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io \
-            -u ${{ github.actor }} --password-stdin
+          sha=$(awk '$1=="arc-gateway"{print $2}' src/VERSIONS)
+          docker build -f src/arc-gateway/docker/Dockerfile \
+            --build-arg APT_MIRROR=$APT_MIRROR \
+            --build-arg CARGO_REGISTRY=$CARGO_REGISTRY \
+            --build-arg CARGO_BUILD_JOBS=2 \
+            -t ghcr.io/${{ github.repository_owner }}/arc-gateway:latest \
+            -t ghcr.io/${{ github.repository_owner }}/arc-gateway:$sha src/arc-gateway
 
-      - name: Pull latest images
-        run: docker compose pull
+      - name: Build arc-core
+        run: |
+          sha=$(awk '$1=="arc-core"{print $2}' src/VERSIONS)
+          docker build -f src/arc-core/docker/Dockerfile \
+            --build-arg APT_MIRROR=$APT_MIRROR \
+            --build-arg PIP_INDEX_URL=$PIP_INDEX_URL \
+            -t ghcr.io/${{ github.repository_owner }}/arc-core:latest \
+            -t ghcr.io/${{ github.repository_owner }}/arc-core:$sha src/arc-core
 
-      - name: Stop existing stack
-        run: docker compose down --remove-orphans || true
+      - name: Build arc-web-admin
+        run: |
+          sha=$(awk '$1=="arc-web-admin"{print $2}' src/VERSIONS)
+          docker build -f src/arc-web-admin/Dockerfile \
+            --build-arg NPM_REGISTRY=$NPM_REGISTRY \
+            -t ghcr.io/${{ github.repository_owner }}/arc-web-admin:latest \
+            -t ghcr.io/${{ github.repository_owner }}/arc-web-admin:$sha src/arc-web-admin
 
-      - name: Boot stack
-        run: docker compose up -d
+      - name: Roll stack
+        # compose 已是 pull_policy: never；--pull never 双保险。up 只重建镜像变了的容器。
+        run: |
+          cd ~/arc-infra
+          docker compose up -d --remove-orphans --no-build --pull never
 
       - name: Wait for gateway health
         run: |
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8000/health 2>/dev/null; then
-              echo "gateway healthy"
-              exit 0
+              echo; echo "gateway healthy"; exit 0
             fi
             sleep 2
           done
           echo "::error::gateway did not become healthy in 60s"
-          docker compose logs --tail=50 gateway
+          cd ~/arc-infra && docker compose logs --tail=50 gateway
           exit 1
 
+      - name: Smoke — keypoints route present
+        run: |
+          body=$(curl -s -m 5 -X POST -H 'Content-Type: application/json' \
+            -d '{"seq":1,"ts_ms":1,"keypoints":[]}' \
+            http://127.0.0.1:8000/api/v1/realtime/sessions/00000000-0000-0000-0000-000000000000/keypoints)
+          echo "$body"
+          echo "$body" | grep -q '会话不存在' || { echo "::error::keypoints route missing"; exit 1; }
+
       - name: Show final state
-        run: docker compose ps
+        run: |
+          cd ~/arc-infra && docker compose ps
+          docker image prune -f >/dev/null || true
